@@ -1,3 +1,5 @@
+from functools import wraps
+
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask.views import MethodView
@@ -35,6 +37,27 @@ def hash_password(password):
 
 def check_password(password, password_hash):
     return bcrypt.check_password_hash(password_hash, password)
+
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth_header = request.headers.get('Authorization')
+        if not auth_header:
+            raise ApiError(401, 'Authorization header is missing')
+
+        try:
+            email, password = auth_header.split(':')
+        except ValueError:
+            raise ApiError(401, 'Invalid authorization header')
+
+        user = User.query.filter_by(email=email).first()
+        if not user or not check_password(password, user.password_hash):
+            raise ApiError(401, 'Invalid credentials')
+
+        return f(*args, user=user, **kwargs)
+
+    return decorated_function
 
 
 class UserView(MethodView):
@@ -108,22 +131,23 @@ class AdvertView(MethodView):
             raise ApiError(404, 'Advert not found')
         return jsonify(advert.to_dict())
 
-    def post(self):
+    @login_required
+    def post(self, user):
         data = request.json
-        if not data or not 'title' in data or not 'description' in data or not 'user_id' in data:
+        if not data or 'title' not in data or 'description' not in data:
             raise ApiError(400, 'Missing required fields')
-        user = db.session.get(User, data['user_id'])
-        if not user:
-            raise ApiError(404, 'User not found')
         advert = Advert(title=data['title'], description=data['description'], user_id=user.id)
         db.session.add(advert)
         db.session.commit()
         return jsonify(advert.to_dict()), 201
 
-    def patch(self, advert_id):
+    @login_required
+    def patch(self, user, advert_id):
         advert = db.session.get(Advert, advert_id)
         if not advert:
             raise ApiError(404, 'Advert not found')
+        if advert.user_id != user.id:
+            raise ApiError(403, 'You do not have permission to edit this advert')
         data = request.json
         if not data:
             raise ApiError(400, 'No data provided')
@@ -134,10 +158,13 @@ class AdvertView(MethodView):
         db.session.commit()
         return jsonify(advert.to_dict()), 200
 
-    def delete(self, advert_id):
+    @login_required
+    def delete(self, user, advert_id):
         advert = db.session.get(Advert, advert_id)
         if not advert:
             raise ApiError(404, 'Advert not found')
+        if advert.user_id != user.id:
+            raise ApiError(403, 'You do not have permission to delete this advert')
         db.session.delete(advert)
         db.session.commit()
         return jsonify({'status': 'deleted'})
